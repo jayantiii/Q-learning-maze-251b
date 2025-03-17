@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 import collections
 
+# Stores experiences
 Transition = collections.namedtuple('Experience',
                                     field_names=['state', 'action',
                                                  'next_state', 'reward',
@@ -18,39 +19,47 @@ class Agent:
         self.env = maze
         self.buffer = memory_buffer # this is actually a reference
         self.num_act = 4
-        self.use_softmax = use_softmax
+        self.use_softmax = use_softmax # toggles between softmax and epsilon-greedy
         self.total_reward = 0
         self.min_reward = -self.env.maze.size
         self.isgameon = True
 
-        
+    # Perform action and udpate state
     def make_a_move(self, net, epsilon, device = 'cuda'):
+        # Choose action using softmax or epsilon-greedy
         action = self.select_action(net, epsilon, device)
+        # Get the current state
         current_state = self.env.state()
+        # Move to new state
         next_state, reward, self.isgameon = self.env.state_update(action)
+        # Update rewards
         self.total_reward += reward
         
+        # End game if total reward is too low
         if self.total_reward < self.min_reward:
             self.isgameon = False
+        # Reset reward when game is terminated
         if not self.isgameon:
             self.total_reward = 0
         
+        # Stores experience for later training
         transition = Transition(current_state, action,
                                 next_state, reward,
                                 self.isgameon)
         
+        # Save experience to memory buffer
         self.buffer.push(transition)
 
 
-
+    # Choose the next action
     def select_action(self, net, epsilon, device='cuda'):
         state = self.env.state()  # Assuming self.env.state() returns a numpy ndarray
     
-        # Convert state to torch.Tensor if it isn't already one
-        if isinstance(state, np.ndarray):  # If it's a numpy array, convert to a tensor
+        # Convert to a tensor if it's a numpy array
+        if isinstance(state, np.ndarray):  
             state_tensor = torch.tensor(state, dtype=torch.float32)
         else:
-            state_tensor = state  # If it's already a torch tensor, no need to convert
+            state_tensor = state  
     
         # Convert device to torch.device in the same line if it's a string
         device = torch.device(device if isinstance(device, str) else 'cpu')  # Default to 'cpu' if not a string
@@ -58,50 +67,92 @@ class Agent:
         # Move the tensor to the correct device (CUDA or CPU)
         state_tensor = state_tensor.to(device)  # This automatically moves the tensor to the correct device
     
-        # Flatten the state tensor to match the input size expected by the network
+        # Flatten the state tensor to match the input size (1D)
         state_tensor = state_tensor.view(-1)  # Flatten the tensor (20, 20) -> (400,)
     
         # Move the model to the correct device
         net = net.to(device)
     
-        # Now use the network to get Q-values (output of the model)
+        # Passes the state through the neural network (net) to get predicted Q-values 
         qvalues = net(state_tensor).cpu().detach().numpy().squeeze()
     
-        # Ensure epsilon is a scalar (if it's not a scalar, pick the first element)
+        # Ensure epsilon is a scalar
         if isinstance(epsilon, np.ndarray):
+            # Convert to scalar if it's a single element
             if epsilon.size == 1:
-                epsilon = epsilon.item()  # Convert to scalar if it's a single element
+                epsilon = epsilon.item() 
+            
+            # Pick the first value if it's an array with multiple values
             else:
-                epsilon = epsilon[0]  # Pick the first value if it's an array with multiple values
+                epsilon = epsilon[0] 
     
         # If using softmax, sample action from q-values
         if self.use_softmax:
-            qvalues = qvalues / epsilon  # Normalize with epsilon
-            p = sp.softmax(qvalues).squeeze()  # Softmax normalization
-            p /= np.sum(p)  # Ensure probabilities sum to 1
-            action = np.random.choice(self.num_act, p=p)  # Sample action based on softmax probabilities
+            # Normalize Q-values for Softmax
+            qvalues = qvalues / epsilon  
+            # Apply Softmax to convert to probabilities
+            p = sp.softmax(qvalues).squeeze()  
+            # Ensure probabilities sum to 1
+            p /= np.sum(p) 
+            # Sample an action 
+            action = np.random.choice(self.num_act, p=p)  
+        
+        # Otherwise, follows Epsilon-greedy action selection
         else:
-            # Epsilon-greedy action selection
+            # Random action
             if np.random.random() < epsilon:
-                action = np.random.randint(self.num_act, size=1)[0]  # Random action
+                action = np.random.randint(self.num_act, size=1)[0]  
+            # Greedy action (based on best Q-value)
             else:
-                action = np.argmax(qvalues)  # Greedy action (based on best Q-value)
+                action = np.argmax(qvalues)
     
         return action
 
 
-    # In Agent class, make sure get_masked_state() is defined correctly
+    # Helper function for masked Q-learning
     def get_masked_state(self, agent_pos, vision_range=2):
         # Assuming env is an instance of MazeEnvironment, you should access the maze like this:
         x, y = agent_pos
-        env = self.env  # Accessing the maze environment object
+        # Accessing the maze environment object
+        env = self.env 
         
-        # Ensure that `env` is the maze environment and subscriptable
+        # Extracts local view of the maze within the agent's vision range
         masked_view = env.maze[max(0, x - vision_range):x + vision_range + 1,
                                max(0, y - vision_range):y + vision_range + 1]
         return masked_view.flatten()
 
-    
+
+    # Action masking
+    def masked_action_selection(self, net, state_tensor, epsilon):
+        # Get current position and valid actions
+        position = self.env.current_position
+        valid_actions = self.env.get_valid_actions(position)
+        
+        # If all actions are invalid, pick random action
+        if np.sum(valid_actions) == 0:
+            return np.random.randint(0, 4)  
+        
+        with torch.no_grad():
+            # Get Q-values
+            q_values = net(state_tensor).cpu().numpy()[0]
+            
+            # Mask invalid actions by setting Q-values to -1e9
+            masked_q_values = q_values.copy()
+            masked_q_values[valid_actions == 0] = -1e9
+
+            # Epsilon-greedy selection for valid actions
+            if np.random.rand() < epsilon:
+                # Choose random valid actions within epsilon possibility
+                valid_indices = np.where(valid_actions == 1)[0]
+                action = np.random.choice(valid_indices)
+            else:
+                # Choose valid action with highest Q-value 
+                action = np.argmax(masked_q_values)
+        
+        return action
+
+
+    # Visualize optimal policy across the maze
     def plot_policy_map(self, net, filename, offset):
         net.eval()
         with torch.no_grad():
@@ -109,8 +160,9 @@ class Agent:
             ax.imshow(self.env.maze, 'Greys')
     
             # Get the device of the model to ensure consistency
-            device = next(net.parameters()).device  # This automatically gets the device of the model (CPU or GPU)
+            device = next(net.parameters()).device  
     
+            # Each cell displays the optimal action for that position
             for free_cell in self.env.allowed_states:
                 self.env.current_position = np.asarray(free_cell)
     
