@@ -44,12 +44,26 @@ class MazeEnvironment:
     # introduce a reset policy, so that for high epsilon the initial
     # position is nearer to the goal (useful for large mazes)
     def reset_policy(self, eps, reg = 7):
-        return sp.softmax(-self.distances/(reg*(1-eps**(2/reg)))**(reg/2)).squeeze()
+        # return sp.softmax(-self.distances/(reg*(1-eps**(2/reg)))**(reg/2)).squeeze()
+        eps = min(0.99, eps)
+    
+        denominator = reg * (1 - eps**(2/reg)) + 1e-10
+        
+        values = -self.distances / (denominator**(reg/2))
+        
+        values = values - np.max(values)
+        
+        probabilities = sp.softmax(values).squeeze()
+        
+        if np.any(np.isnan(probabilities)):
+            return np.ones(len(self.allowed_states)) / len(self.allowed_states)
+        
+        return probabilities
     
     # reset the environment when the game is completed
     # with probability prand the reset is random, otherwise
     # the reset policy at the given epsilon is used
-    def reset(self, epsilon, prand = 0):
+    def reset(self, epsilon, prand = 0.5):
         if np.random.rand() < prand:
             idx = np.random.choice(len(self.allowed_states))
         else:
@@ -57,6 +71,10 @@ class MazeEnvironment:
             idx = np.random.choice(len(self.allowed_states), p = p)
 
         self.current_position = np.asarray(self.allowed_states[idx])
+
+        while (self.current_position == self.goal).all():
+            idx = np.random.choice(len(self.allowed_states))
+            self.current_position = np.asarray(self.allowed_states[idx])
         
         self.visited = set()
         self.visited.add(tuple(self.current_position))
@@ -64,32 +82,57 @@ class MazeEnvironment:
         return self.state()
     
     
+    # def state_update(self, action):
+    #     isgameon = True
+        
+    #     # each move costs -0.05
+    #     reward = -0.05
+        
+    #     move = self.action_map[action]
+    #     next_position = self.current_position + np.asarray(move)
+        
+    #     # if the goals has been reached, the reward is 1
+    #     if (self.current_position == self.goal).all():
+    #             reward = 1
+    #             isgameon = False
+    #             return [self.state(), reward, isgameon]
+            
+    #     # if the cell has been visited before, the reward is -0.2
+    #     else:
+    #         if tuple(self.current_position) in self.visited:
+    #             reward = -0.2
+        
+    #     # if the moves goes out of the maze or to a wall, the
+    #     # reward is -1
+    #     if self.is_state_valid(next_position):
+    #         self.current_position = next_position
+    #     else:
+    #         reward = -1
+        
+    #     self.visited.add(tuple(self.current_position))
+    #     return [self.state(), reward, isgameon]
+
     def state_update(self, action):
         isgameon = True
-        
-        # each move costs -0.05
         reward = -0.05
         
         move = self.action_map[action]
         next_position = self.current_position + np.asarray(move)
         
-        # if the goals has been reached, the reward is 1
-        if (self.current_position == self.goal).all():
-                reward = 1
-                isgameon = False
-                return [self.state(), reward, isgameon]
-            
-        # if the cell has been visited before, the reward is -0.2
-        else:
-            if tuple(self.current_position) in self.visited:
-                reward = -0.2
-        
-        # if the moves goes out of the maze or to a wall, the
-        # reward is -1
+        # First check if the move is valid
         if self.is_state_valid(next_position):
             self.current_position = next_position
         else:
             reward = -1
+        
+        # Then check if we've reached the goal (AFTER moving)
+        if (self.current_position == self.goal).all():
+            reward = 1
+            isgameon = False
+        
+        # Check for revisited cells
+        elif tuple(self.current_position) in self.visited:
+            reward = -0.2
         
         self.visited.add(tuple(self.current_position))
         return [self.state(), reward, isgameon]
